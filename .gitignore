@@ -1,0 +1,22 @@
+# Binaries
+oss-sync
+oss-sync.exe
+dist/
+
+# SQLite state files
+*.db
+*.db-shm
+*.db-wal
+
+# Local configs with credentials
+config.minio.yaml
+config.local.yaml
+
+# Go build cache
+vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo

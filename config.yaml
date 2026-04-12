@@ -1,0 +1,21 @@
+source:
+  provider: "oss"                             # oss | obs | s3
+  endpoint: "oss-cn-hangzhou.aliyuncs.com"
+  access_key_id: "YOUR_OSS_ACCESS_KEY_ID"
+  access_key_secret: "YOUR_OSS_ACCESS_KEY_SECRET"
+  bucket: "my-oss-bucket"
+  prefix: ""                                  # optional: only sync objects under this prefix
+
+dest:
+  provider: "obs"                             # oss | obs | s3
+  endpoint: "obs.cn-north-4.myhuaweicloud.com"
+  access_key_id: "YOUR_OBS_ACCESS_KEY_ID"
+  access_key_secret: "YOUR_OBS_ACCESS_KEY_SECRET"
+  bucket: "my-obs-bucket"
+
+sync:
+  mode: "incremental"         # full | incremental
+  concurrency: 10             # number of concurrent upload workers
+  rate_limit_mbps: 50         # total bandwidth cap in MB/s (0 = unlimited)
+  page_size: 1000             # objects per list page
+  db_path: "./sync.db"        # SQLite file path for sync state

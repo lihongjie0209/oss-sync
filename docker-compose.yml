@@ -1,0 +1,58 @@
+services:
+  minio-src:
+    image: minio/minio:latest
+    container_name: minio-src
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio_src_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  minio-dst:
+    image: minio/minio:latest
+    container_name: minio-dst
+    ports:
+      - "9002:9000"
+      - "9003:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio_dst_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # One-shot container that creates the test buckets after MinIO is healthy.
+  minio-init:
+    image: minio/mc:latest
+    container_name: minio-init
+    depends_on:
+      minio-src:
+        condition: service_healthy
+      minio-dst:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+        mc alias set src http://minio-src:9000 minioadmin minioadmin &&
+        mc alias set dst http://minio-dst:9000 minioadmin minioadmin &&
+        mc mb --ignore-existing src/src-bucket &&
+        mc mb --ignore-existing dst/dst-bucket &&
+        echo 'Buckets ready.'
+      "
+
+volumes:
+  minio_src_data:
+  minio_dst_data:
