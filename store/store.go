@@ -34,3 +34,9 @@ type Destination interface {
 	// Close releases any SDK-level resources.
 	Close()
 }
+
+// ProbeableDestination can validate bucket-level connectivity without writing data.
+type ProbeableDestination interface {
+	Destination
+	Probe() error
+}

@@ -108,6 +108,33 @@ func rootCmd() *cobra.Command {
 	syncCmd.Flags().StringVarP(&mode, "mode", "m", "", "sync mode: full | incremental (overrides config)")
 	syncCmd.Flags().BoolVar(&noTUI, "no-tui", false, "disable TUI and print plain log output")
 
+	testCmd := &cobra.Command{
+		Use:   "test",
+		Short: "Validate source and dest storage configuration",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.Load(cfgPath)
+			if err != nil {
+				return fmt.Errorf("load config: %w", err)
+			}
+
+			sourceResult, err := syncer.TestSourceConfig(cfg.Source)
+			if err != nil {
+				return err
+			}
+			printEndpointCheck(os.Stdout, sourceResult)
+
+			destResult, err := syncer.TestDestConfig(cfg.Dest)
+			if err != nil {
+				return err
+			}
+			printEndpointCheck(os.Stdout, destResult)
+
+			fmt.Fprintln(os.Stdout, "Configuration test passed.")
+			return nil
+		},
+	}
+	testCmd.Flags().StringVarP(&cfgPath, "config", "c", "config.yaml", "path to config file")
+
 	// ── stats command ───────────────────────────────────────────────────
 	var (
 		statsInterval time.Duration
@@ -179,6 +206,13 @@ func rootCmd() *cobra.Command {
 	failedCmd.Flags().StringVarP(&cfgPath, "config", "c", "config.yaml", "path to config file")
 	failedCmd.Flags().IntVar(&failedLimit, "limit", 100, "maximum failed files to show")
 
-	root.AddCommand(syncCmd, statsCmd, failedCmd)
+	root.AddCommand(syncCmd, testCmd, statsCmd, failedCmd)
 	return root
+}
+
+func printEndpointCheck(w io.Writer, result syncer.EndpointCheckResult) {
+	fmt.Fprintf(w, "[OK] %s provider=%s bucket=%s endpoint=%s\n", result.Role, result.Provider, result.Bucket, result.Endpoint)
+	if result.Prefix != "" {
+		fmt.Fprintf(w, "     prefix=%s\n", result.Prefix)
+	}
 }

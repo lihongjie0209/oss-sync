@@ -26,6 +26,15 @@ type taskBatch struct {
 	tasks  []SyncTask
 }
 
+// EndpointCheckResult describes a successfully validated endpoint.
+type EndpointCheckResult struct {
+	Role     string
+	Provider string
+	Endpoint string
+	Bucket   string
+	Prefix   string
+}
+
 func mappingLabel(mapping config.PrefixMapping) string {
 	return fmt.Sprintf("%s -> %s", mapping.SourcePrefix, mapping.DestPrefix)
 }
@@ -91,6 +100,61 @@ func buildDest(ep config.EndpointConfig) (store.Destination, error) {
 	default:
 		return nil, fmt.Errorf("provider %q cannot be used as dest (obs | oss | s3)", ep.Provider)
 	}
+}
+
+// TestSourceConfig validates the source endpoint can be initialized and listed.
+func TestSourceConfig(ep config.EndpointConfig) (EndpointCheckResult, error) {
+	src, err := buildSource(ep)
+	if err != nil {
+		return EndpointCheckResult{}, fmt.Errorf("init source (%s): %w", ep.Provider, err)
+	}
+	if err := testSourceStore(src, ep.Prefix); err != nil {
+		return EndpointCheckResult{}, fmt.Errorf("test source (%s): %w", ep.Provider, err)
+	}
+	return EndpointCheckResult{
+		Role:     "source",
+		Provider: ep.Provider,
+		Endpoint: ep.Endpoint,
+		Bucket:   ep.Bucket,
+		Prefix:   ep.Prefix,
+	}, nil
+}
+
+// TestDestConfig validates the destination endpoint can be initialized and reached.
+func TestDestConfig(ep config.EndpointConfig) (EndpointCheckResult, error) {
+	dst, err := buildDest(ep)
+	if err != nil {
+		return EndpointCheckResult{}, fmt.Errorf("init dest (%s): %w", ep.Provider, err)
+	}
+	defer dst.Close()
+	if err := testDestinationStore(dst); err != nil {
+		return EndpointCheckResult{}, fmt.Errorf("test dest (%s): %w", ep.Provider, err)
+	}
+	return EndpointCheckResult{
+		Role:     "dest",
+		Provider: ep.Provider,
+		Endpoint: ep.Endpoint,
+		Bucket:   ep.Bucket,
+		Prefix:   ep.Prefix,
+	}, nil
+}
+
+func testSourceStore(src store.Source, prefix string) error {
+	if _, _, _, err := src.ListPage(prefix, "", 1); err != nil {
+		return fmt.Errorf("list source objects: %w", err)
+	}
+	return nil
+}
+
+func testDestinationStore(dst store.Destination) error {
+	probeable, ok := dst.(store.ProbeableDestination)
+	if !ok {
+		return fmt.Errorf("destination %T does not support connectivity probes", dst)
+	}
+	if err := probeable.Probe(); err != nil {
+		return err
+	}
+	return nil
 }
 
 // Close releases all resources.

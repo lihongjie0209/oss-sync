@@ -70,6 +70,7 @@ type fakeDest struct {
 	mu       sync.Mutex
 	uploaded map[string][]byte
 	err      error
+	probeErr error
 }
 
 func (d *fakeDest) PutObjectFromStream(key string, body io.Reader, size int64) error {
@@ -90,6 +91,10 @@ func (d *fakeDest) PutObjectFromStream(key string, body io.Reader, size int64) e
 }
 
 func (d *fakeDest) Close() {}
+
+func (d *fakeDest) Probe() error {
+	return d.probeErr
+}
 
 type flakySource struct {
 	failuresRemaining int
@@ -293,6 +298,30 @@ func TestSyncerNewRunCloseAndProviderValidation(t *testing.T) {
 		t.Fatalf("run wrapper: %v", err)
 	}
 	s.Close()
+}
+
+type nonProbeDest struct{}
+
+func (d nonProbeDest) PutObjectFromStream(key string, body io.Reader, size int64) error { return nil }
+func (d nonProbeDest) Close()                                                           {}
+
+func TestEndpointConfigValidationHelpers(t *testing.T) {
+	if err := testSourceStore(&fakeSource{}, ""); err != nil {
+		t.Fatalf("expected source probe to succeed: %v", err)
+	}
+	if err := testSourceStore(&fakeSource{listErr: errors.New("list failed")}, "docs/"); err == nil {
+		t.Fatal("expected source probe failure")
+	}
+
+	if err := testDestinationStore(&fakeDest{}); err != nil {
+		t.Fatalf("expected destination probe to succeed: %v", err)
+	}
+	if err := testDestinationStore(&fakeDest{probeErr: errors.New("head failed")}); err == nil {
+		t.Fatal("expected destination probe failure")
+	}
+	if err := testDestinationStore(nonProbeDest{}); err == nil {
+		t.Fatal("expected destination without probe support to fail")
+	}
 }
 
 func TestWorkerProcessMarksFailuresAndSuccess(t *testing.T) {

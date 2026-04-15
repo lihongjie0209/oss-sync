@@ -95,6 +95,9 @@ sync:
 ### 执行同步
 
 ```bash
+# 先验证 source / dest 配置是否可用
+./oss-sync test -c config.yaml
+
 # 使用配置文件中的模式
 ./oss-sync sync -c config.yaml
 

@@ -119,5 +119,16 @@ func (s *S3Store) PutObjectFromStream(key string, body io.Reader, size int64) er
 	return nil
 }
 
+// Probe validates the configured bucket without creating any object.
+func (s *S3Store) Probe() error {
+	_, err := s.client.HeadBucket(context.Background(), &s3.HeadBucketInput{
+		Bucket: aws.String(s.bucketName),
+	})
+	if err != nil {
+		return fmt.Errorf("head s3 bucket %s: %w", s.bucketName, err)
+	}
+	return nil
+}
+
 // Close is a no-op (AWS SDK manages connection pool internally).
 func (s *S3Store) Close() {}

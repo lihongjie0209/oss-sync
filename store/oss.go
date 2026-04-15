@@ -85,5 +85,13 @@ func (s *OSSStore) PutObjectFromStream(key string, body io.Reader, size int64) e
 	return nil
 }
 
+// Probe validates the configured OSS bucket by issuing a lightweight list request.
+func (s *OSSStore) Probe() error {
+	if _, _, _, err := s.ListPage("", "", 1); err != nil {
+		return fmt.Errorf("probe oss bucket: %w", err)
+	}
+	return nil
+}
+
 // Close is a no-op for OSS (SDK manages connection pool internally).
 func (s *OSSStore) Close() {}

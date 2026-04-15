@@ -40,6 +40,14 @@ func (s *OBSStore) PutObjectFromStream(key string, body io.Reader, size int64) e
 	return nil
 }
 
+// Probe validates the configured OBS bucket without writing test data.
+func (s *OBSStore) Probe() error {
+	if _, err := s.client.HeadBucket(s.bucketName); err != nil {
+		return fmt.Errorf("head obs bucket %s: %w", s.bucketName, err)
+	}
+	return nil
+}
+
 // Close releases OBS client resources.
 func (s *OBSStore) Close() {
 	s.client.Close()
