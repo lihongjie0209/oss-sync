@@ -2,6 +2,8 @@
 
 对象存储桶间的同步工具，支持增量同步与全量同步，使用 SQLite 记录同步状态，内置 TUI 实时仪表盘。
 
+![oss-sync TUI dashboard](docs/assets/tui-dashboard.png)
+
 ## 功能特性
 
 | 特性 | 说明 |
@@ -20,6 +22,8 @@
 
 ## 快速开始
 
+运维手册见：[`docs/operations-manual.md`](docs/operations-manual.md)
+
 ### 前置依赖
 
 - Go 1.21+（无需 CGO，纯 Go 编译）
@@ -31,6 +35,37 @@
 git clone <repo-url>
 cd oss-sync
 go build -o oss-sync ./cmd/
+```
+
+**Windows PowerShell：**
+
+```powershell
+go build -o oss-sync.exe .\cmd
+.\oss-sync.exe test -c config.yaml
+.\oss-sync.exe sync -c config.yaml
+```
+
+如果临时不落地二进制，建议直接运行：
+
+```powershell
+go run .\cmd\main.go sync -c config.yaml
+```
+
+不要在仓库根目录直接执行 `go build -o xxx.exe`，因为根目录本身没有 Go 入口文件，入口在 `.\cmd`。
+
+如果出现：
+
+```text
+The specified executable is not a valid application for this OS platform
+```
+
+通常是因为之前设置过 `GOOS=linux` / `GOARCH=amd64` 并生成了 Linux 二进制。可先清理环境变量后重新构建：
+
+```powershell
+Remove-Item Env:GOOS -ErrorAction SilentlyContinue
+Remove-Item Env:GOARCH -ErrorAction SilentlyContinue
+Remove-Item Env:CGO_ENABLED -ErrorAction SilentlyContinue
+go build -o oss-sync.exe .\cmd
 ```
 
 ### 配置文件
@@ -198,34 +233,17 @@ sync:
 
 ## TUI 仪表盘
 
-在交互式终端运行 `sync` 或 `stats` 时，自动进入全屏实时仪表盘，展示：
+在交互式终端运行 `sync` 或 `stats` 时，自动进入全屏实时仪表盘，当前界面示例如下：
 
-```
-╭─────────────────────────────────────────╮
-│  oss-sync                               │
-│                                         │
-│ Session                                 │
-│ ──────────────────────────────────────  │
-│ ID          3                           │
-│ Mode        incremental                 │
-│ Started     2026-04-12 22:58:12         │
-│ Elapsed     00:33                       │
-│ Status      ● running                   │
-│                                         │
-│ Objects                                 │
-│ ──────────────────────────────────────  │
-│ Total        12847                      │
-│ Synced       9601                       │
-│ Pending      3200                       │
-│ Failed          46                      │
-│                                         │
-│ Progress                                │
-│ ──────────────────────────────────────  │
-│ [████████████████░░░░░░░░]  74.7%       │
-│                                         │
-│  q quit                                 │
-╰─────────────────────────────────────────╯
-```
+![oss-sync TUI dashboard](docs/assets/tui-dashboard.png)
+
+当前版本会展示：
+
+- Session 信息：ID、模式、开始时间、耗时、状态
+- Transfer metrics：总文件数、已同步、Pending、失败数、文件速率、发现速率、字节吞吐、同步字节数、平均/最大文件大小、ETA
+- Progress 进度条
+- 明细 Tab：`Recent synced` / `Failed files`
+- 快捷键：`Tab` / `1` / `2` 切换明细，`q` 退出
 
 > 当同步完成（`pending = 0` 且 session 状态不为 `running`）时，TUI 自动退出；手动按 `q` 会直接结束界面并取消当前同步。
 
