@@ -73,7 +73,6 @@ Remove-Item Env:GOARCH -ErrorAction SilentlyContinue
 Remove-Item Env:CGO_ENABLED -ErrorAction SilentlyContinue
 go build -o oss-sync.exe .\cmd
 ```
-
 ## 3. 配置文件说明
 
 ### 3.1 最小可用示例
@@ -108,6 +107,7 @@ sync:
 
 ### 3.2 OSS -> OBS 配置示例
 
+当目标端是华为云 OBS 时，可参考：
 ```yaml
 source:
   provider: "oss"
@@ -135,6 +135,11 @@ sync:
 ```
 
 适用于：源端在阿里云 OSS，目标端在华为云 OBS 的迁移或备份场景。
+
+注意：
+
+- `dest.provider` 必须是 `obs`
+- OBS 目前仅支持作为目标端使用
 
 ### 3.3 目录映射语义
 
