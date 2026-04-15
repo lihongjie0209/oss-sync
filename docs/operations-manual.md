@@ -324,6 +324,20 @@ Configuration test passed.
 - 上传二进制
 - 同时上传指定配置文件
 
+### 4.6 一键打包 Windows / macOS / Linux
+
+如果需要一次性产出三个平台的可执行文件，可执行：
+
+```powershell
+.\build-all-platforms.ps1
+```
+
+默认输出到 `dist\` 目录：
+
+- `oss-sync-windows-amd64.exe`
+- `oss-sync-linux-amd64`
+- `oss-sync-darwin-amd64`
+
 ## 5. 推荐操作流程
 
 ### 场景一：首次上线

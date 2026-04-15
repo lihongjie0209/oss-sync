@@ -157,6 +157,18 @@ sync:
 - `-RemoteDir`：OSS 中的目标目录，默认 `oss-sync`
 - `-BinaryName`：生成并上传的 Linux 二进制名称，默认 `oss-sync-linux-amd64`
 
+### 一键打包 Windows / macOS / Linux
+
+```powershell
+.\build-all-platforms.ps1
+```
+
+默认会在 `dist\` 目录生成：
+
+- `oss-sync-windows-amd64.exe`
+- `oss-sync-linux-amd64`
+- `oss-sync-darwin-amd64`
+
 **目录映射语义**
 
 - 当同时设置 `source.prefix` 和 `dest.prefix` 时，程序会保留 `source.prefix` 之后的相对路径，再拼接到 `dest.prefix`。
