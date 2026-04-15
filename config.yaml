@@ -4,7 +4,13 @@ source:
   access_key_id: "YOUR_OSS_ACCESS_KEY_ID"
   access_key_secret: "YOUR_OSS_ACCESS_KEY_SECRET"
   bucket: "my-oss-bucket"
-  prefix: ""                                  # optional: only sync objects under this prefix
+  prefix: "images/raw/"                       # optional: only sync this source directory
+  # S3-specific options (used when provider = "s3")
+  # region: "us-east-1"
+  # force_path_style: false
+
+  # Set to true for endpoints with self-signed or private-CA certificates.
+  # insecure_skip_verify: false
 
 dest:
   provider: "obs"                             # oss | obs | s3
@@ -12,10 +18,19 @@ dest:
   access_key_id: "YOUR_OBS_ACCESS_KEY_ID"
   access_key_secret: "YOUR_OBS_ACCESS_KEY_SECRET"
   bucket: "my-obs-bucket"
+  prefix: "backup/2026/"                      # optional: write into this destination directory
 
 sync:
   mode: "incremental"         # full | incremental
   concurrency: 10             # number of concurrent upload workers
   rate_limit_mbps: 50         # total bandwidth cap in MB/s (0 = unlimited)
   page_size: 1000             # objects per list page
+  retry_count: 3              # retry each failed file up to N times
   db_path: "./sync.db"        # SQLite file path for sync state
+  # optional: define multiple prefix mappings; when set, source.prefix/dest.prefix
+  # act only as backward-compatible single-mapping fields and are ignored by sync.mappings
+  # mappings:
+  #   - source_prefix: "images/raw/"
+  #     dest_prefix: "backup/2026/raw/"
+  #   - source_prefix: "images/thumbs/"
+  #     dest_prefix: "backup/2026/thumbs/"

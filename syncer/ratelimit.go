@@ -14,6 +14,7 @@ type rateLimitedReader struct {
 	ctx     context.Context
 	r       io.Reader
 	limiter *rate.Limiter
+	tracker *TransferTracker
 }
 
 // NewRateLimiter creates a token-bucket limiter for the given MB/s cap.
@@ -29,11 +30,14 @@ func NewRateLimiter(rateMbps float64) *rate.Limiter {
 }
 
 // WrapReader wraps r with rate limiting from the shared limiter.
-func WrapReader(ctx context.Context, r io.Reader, limiter *rate.Limiter) io.Reader {
+func WrapReader(ctx context.Context, r io.Reader, limiter *rate.Limiter, tracker *TransferTracker) io.Reader {
 	if limiter == nil || limiter.Limit() == rate.Inf {
-		return r
+		if tracker == nil {
+			return r
+		}
+		return &countingReader{r: r, tracker: tracker}
 	}
-	return &rateLimitedReader{ctx: ctx, r: r, limiter: limiter}
+	return &rateLimitedReader{ctx: ctx, r: r, limiter: limiter, tracker: tracker}
 }
 
 func (r *rateLimitedReader) Read(p []byte) (int, error) {
@@ -52,5 +56,17 @@ func (r *rateLimitedReader) Read(p []byte) (int, error) {
 	if waitErr := r.limiter.WaitN(r.ctx, n); waitErr != nil {
 		return n, waitErr
 	}
+	r.tracker.AddBytes(n)
+	return n, err
+}
+
+type countingReader struct {
+	r       io.Reader
+	tracker *TransferTracker
+}
+
+func (r *countingReader) Read(p []byte) (int, error) {
+	n, err := r.r.Read(p)
+	r.tracker.AddBytes(n)
 	return n, err
 }

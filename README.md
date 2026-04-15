@@ -9,10 +9,13 @@
 | **多后端支持** | 阿里云 OSS、华为云 OBS、任意 S3 兼容存储（MinIO、AWS S3、Cloudflare R2 等） |
 | **增量同步** | 基于上次同步时间，只同步新增或修改的对象 |
 | **全量同步** | 比对 ETag，跳过未变更对象，避免重复上传 |
+| **目录映射** | 支持将源 bucket 下指定目录同步到目标 bucket 下另一个指定目录 |
 | **分页并发** | 基于 Prefix 分页列举，可配置并发 Worker 数 |
+| **失败自动重试** | 单文件下载/上传失败时自动重试，默认 3 次 |
 | **限速控制** | 令牌桶算法限制总带宽，避免占满出口 |
 | **断点续传** | SQLite 持久化同步状态，重启后可从中断处继续 |
 | **TUI 仪表盘** | 终端实时刷新进度（bubbletea），非 TTY 自动切换无头输出 |
+| **失败任务排查** | TUI 独立失败 Tab，并支持命令行查询失败文件及原因 |
 | **会话元数据** | 记录每次同步的开始时间、耗时、状态，方便回溯 |
 
 ## 快速开始
@@ -47,7 +50,7 @@ source:
   access_key_id: "YOUR_OSS_AK"
   access_key_secret: "YOUR_OSS_SK"
   bucket: "my-source-bucket"
-  prefix: ""                                # 可选：只同步指定前缀下的对象
+  prefix: "images/raw/"                     # 可选：只同步源端指定目录
 
 dest:
   provider: "obs"                           # obs | oss | s3
@@ -55,13 +58,21 @@ dest:
   access_key_id: "YOUR_OBS_AK"
   access_key_secret: "YOUR_OBS_SK"
   bucket: "my-dest-bucket"
+  prefix: "backup/2026/"                    # 可选：写入目标端指定目录
 
 sync:
   mode: "incremental"    # full | incremental
   concurrency: 10        # 并发 Worker 数
   rate_limit_mbps: 50    # 带宽上限 MB/s，0 表示不限速
   page_size: 1000        # 每次列举的最大对象数
+  retry_count: 3         # 单文件失败自动重试次数
   db_path: "./sync.db"   # SQLite 状态文件路径
+  # 可选：定义多组目录映射；设置后优先于 source.prefix / dest.prefix
+  # mappings:
+  #   - source_prefix: "images/raw/"
+  #     dest_prefix: "backup/2026/raw/"
+  #   - source_prefix: "images/thumbs/"
+  #     dest_prefix: "backup/2026/thumbs/"
 ```
 
 **配置项说明**
@@ -70,13 +81,16 @@ sync:
 |------|------|------|
 | `source.provider` | string | 源端类型：`oss`（阿里云）或 `s3`（S3 兼容） |
 | `dest.provider` | string | 目标端类型：`obs`（华为云）、`oss`、`s3` |
-| `source.prefix` | string | 列举前缀过滤，留空同步全部对象 |
+| `source.prefix` | string | 源端目录前缀；仅同步该目录下的对象 |
+| `dest.prefix` | string | 目标端目录前缀；将源端相对路径写入该目录下 |
 | `source.force_path_style` | bool | S3 Path-Style 寻址，MinIO 必须设为 `true` |
 | `sync.mode` | string | `full` 全量 / `incremental` 增量 |
 | `sync.concurrency` | int | 并发上传 Worker 数，建议 4–20 |
 | `sync.rate_limit_mbps` | float | 总带宽上限（MB/s），`0` 不限速 |
 | `sync.page_size` | int | 每页列举对象数，最大 1000 |
+| `sync.retry_count` | int | 单文件失败自动重试次数，默认 `3` |
 | `sync.db_path` | string | SQLite 状态库路径 |
+| `sync.mappings` | array | 多组目录映射列表；设置后优先于 `source.prefix` / `dest.prefix` |
 
 ### 执行同步
 
@@ -89,6 +103,38 @@ sync:
 
 # 禁用 TUI，直接输出日志（适合后台运行 / 重定向日志）
 ./oss-sync sync -c config.yaml --no-tui
+```
+
+### 一键打包并上传 Linux 版本
+
+```powershell
+.\build-upload-linux.ps1 -ConfigPath config-handao-dev.yaml -RemoteDir oss-sync
+```
+
+`config-handao-dev.yaml` 这类带凭证的运行配置建议仅保留在本地，仓库默认已忽略该文件。
+
+可选参数：
+
+- `-ConfigPath`：要一起上传的配置文件，默认 `config-handao-dev.yaml`
+- `-RemoteDir`：OSS 中的目标目录，默认 `oss-sync`
+- `-BinaryName`：生成并上传的 Linux 二进制名称，默认 `oss-sync-linux-amd64`
+
+**目录映射语义**
+
+- 当同时设置 `source.prefix` 和 `dest.prefix` 时，程序会保留 `source.prefix` 之后的相对路径，再拼接到 `dest.prefix`。
+- 例如：`images/raw/a.jpg -> backup/2026/a.jpg`。
+- 当设置 `sync.mappings` 时，会按映射列表逐组执行；**每组映射内部**仍然使用 `sync.concurrency` 个 worker 并发处理对象。
+
+**多映射示例**
+
+```yaml
+sync:
+  concurrency: 10
+  mappings:
+    - source_prefix: "images/raw/"
+      dest_prefix: "backup/2026/raw/"
+    - source_prefix: "images/thumbs/"
+      dest_prefix: "backup/2026/thumbs/"
 ```
 
 ### 查看统计
@@ -106,6 +152,14 @@ sync:
 # 调整 TUI 刷新频率
 ./oss-sync stats -c config.yaml --interval 1s
 ```
+
+### 查看失败文件
+
+```bash
+./oss-sync failed -c config.yaml --limit 100
+```
+
+输出会展示源 key、目标 key、文件大小和最后一次失败原因，便于补偿或排障。
 
 **无头输出示例：**
 
@@ -170,7 +224,7 @@ sync:
 ╰─────────────────────────────────────────╯
 ```
 
-> 当同步完成（`pending = 0` 且 session 状态不为 `running`）时，TUI 自动退出。
+> 当同步完成（`pending = 0` 且 session 状态不为 `running`）时，TUI 自动退出；手动按 `q` 会直接结束界面并取消当前同步。
 
 ---
 

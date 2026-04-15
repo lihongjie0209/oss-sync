@@ -11,6 +11,11 @@ dist/
 # Local configs with credentials
 config.minio.yaml
 config.local.yaml
+config-handao-dev.yaml
+
+# Runtime artifacts
+*.out
+core
 
 # Go build cache
 vendor/

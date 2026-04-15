@@ -1,8 +1,10 @@
 package store
 
 import (
+	"crypto/tls"
 	"fmt"
 	"io"
+	"net/http"
 
 	"github.com/aliyun/aliyun-oss-go-sdk/oss"
 )
@@ -13,8 +15,18 @@ type OSSStore struct {
 }
 
 // NewOSSStore creates an authenticated OSS store.
-func NewOSSStore(endpoint, accessKeyID, accessKeySecret, bucketName string) (*OSSStore, error) {
-	client, err := oss.New(endpoint, accessKeyID, accessKeySecret)
+// Set insecureSkipVerify=true for endpoints with self-signed or private-CA certificates.
+func NewOSSStore(endpoint, accessKeyID, accessKeySecret, bucketName string, insecureSkipVerify bool) (*OSSStore, error) {
+	var opts []oss.ClientOption
+	if insecureSkipVerify {
+		opts = append(opts, oss.HTTPClient(&http.Client{
+			Transport: &http.Transport{
+				TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
+			},
+		}))
+	}
+
+	client, err := oss.New(endpoint, accessKeyID, accessKeySecret, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("create oss client: %w", err)
 	}

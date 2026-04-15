@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -18,26 +19,38 @@ type EndpointConfig struct {
 	AccessKeySecret string `yaml:"access_key_secret"`
 	Bucket          string `yaml:"bucket"`
 
-	// Prefix is only used for the source (objects to sync from).
+	// Prefix scopes objects to a directory-like prefix.
+	// For source it limits listing; for dest it prefixes uploaded object keys.
 	Prefix string `yaml:"prefix"`
 
 	// S3-specific options (used when provider = "s3").
 	Region         string `yaml:"region"`
 	ForcePathStyle bool   `yaml:"force_path_style"`
+
+	// InsecureSkipVerify disables TLS certificate verification.
+	// Use only for endpoints with self-signed or private-CA certificates.
+	InsecureSkipVerify bool `yaml:"insecure_skip_verify"`
 }
 
 type SyncConfig struct {
-	Mode          string  `yaml:"mode"`            // full | incremental
-	Concurrency   int     `yaml:"concurrency"`     // concurrent worker count
-	RateLimitMbps float64 `yaml:"rate_limit_mbps"` // bandwidth cap MB/s, 0 = unlimited
-	PageSize      int     `yaml:"page_size"`       // objects per list page
-	DBPath        string  `yaml:"db_path"`         // sqlite file path
+	Mode          string          `yaml:"mode"`            // full | incremental
+	Concurrency   int             `yaml:"concurrency"`     // concurrent worker count
+	RateLimitMbps float64         `yaml:"rate_limit_mbps"` // bandwidth cap MB/s, 0 = unlimited
+	PageSize      int             `yaml:"page_size"`       // objects per list page
+	RetryCount    int             `yaml:"retry_count"`     // retry attempts per file on transient failures
+	DBPath        string          `yaml:"db_path"`         // sqlite file path
+	Mappings      []PrefixMapping `yaml:"mappings"`
 }
 
 type Config struct {
 	Source EndpointConfig `yaml:"source"`
 	Dest   EndpointConfig `yaml:"dest"`
 	Sync   SyncConfig     `yaml:"sync"`
+}
+
+type PrefixMapping struct {
+	SourcePrefix string `yaml:"source_prefix"`
+	DestPrefix   string `yaml:"dest_prefix"`
 }
 
 func Load(path string) (*Config, error) {
@@ -57,6 +70,15 @@ func Load(path string) (*Config, error) {
 
 	cfg.setDefaults()
 	return cfg, nil
+}
+
+func normalizePrefix(prefix string) string {
+	prefix = strings.TrimSpace(prefix)
+	prefix = strings.Trim(prefix, "/")
+	if prefix == "" {
+		return ""
+	}
+	return prefix + "/"
 }
 
 func (c *Config) validate() error {
@@ -92,6 +114,9 @@ func (c *Config) setDefaults() {
 	if c.Sync.PageSize <= 0 {
 		c.Sync.PageSize = 1000
 	}
+	if c.Sync.RetryCount <= 0 {
+		c.Sync.RetryCount = 3
+	}
 	if c.Sync.DBPath == "" {
 		c.Sync.DBPath = "./sync.db"
 	}
@@ -101,5 +126,39 @@ func (c *Config) setDefaults() {
 	if c.Dest.Region == "" {
 		c.Dest.Region = "us-east-1"
 	}
+	c.Source.Prefix = normalizePrefix(c.Source.Prefix)
+	c.Dest.Prefix = normalizePrefix(c.Dest.Prefix)
+	for i := range c.Sync.Mappings {
+		c.Sync.Mappings[i].SourcePrefix = normalizePrefix(c.Sync.Mappings[i].SourcePrefix)
+		c.Sync.Mappings[i].DestPrefix = normalizePrefix(c.Sync.Mappings[i].DestPrefix)
+	}
 }
 
+func (c *Config) PrefixMappings() []PrefixMapping {
+	if len(c.Sync.Mappings) == 0 {
+		return []PrefixMapping{{
+			SourcePrefix: c.Source.Prefix,
+			DestPrefix:   c.Dest.Prefix,
+		}}
+	}
+	mappings := make([]PrefixMapping, len(c.Sync.Mappings))
+	copy(mappings, c.Sync.Mappings)
+	return mappings
+}
+
+func (c *Config) ScopeForMapping(mapping PrefixMapping) string {
+	return fmt.Sprintf(
+		"src:%s|%s|%s|%s=>dst:%s|%s|%s|%s",
+		c.Source.Provider, c.Source.Endpoint, c.Source.Bucket, mapping.SourcePrefix,
+		c.Dest.Provider, c.Dest.Endpoint, c.Dest.Bucket, mapping.DestPrefix,
+	)
+}
+
+func (c *Config) Scopes() []string {
+	mappings := c.PrefixMappings()
+	scopes := make([]string, 0, len(mappings))
+	for _, mapping := range mappings {
+		scopes = append(scopes, c.ScopeForMapping(mapping))
+	}
+	return scopes
+}

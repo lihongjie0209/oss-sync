@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/oss-sync/config"
@@ -18,6 +19,31 @@ type Syncer struct {
 	dst       store.Destination
 	database  *db.DB
 	sessionID int64 // set during RunWithContext
+}
+
+type taskBatch struct {
+	listed int
+	tasks  []SyncTask
+}
+
+func mappingLabel(mapping config.PrefixMapping) string {
+	return fmt.Sprintf("%s -> %s", mapping.SourcePrefix, mapping.DestPrefix)
+}
+
+func (s *Syncer) scope(mapping config.PrefixMapping) string {
+	return s.cfg.ScopeForMapping(mapping)
+}
+
+func (s *Syncer) mapObjectKey(mapping config.PrefixMapping, sourceKey string) (string, error) {
+	sourcePrefix := mapping.SourcePrefix
+	relativeKey := sourceKey
+	if sourcePrefix != "" {
+		if !strings.HasPrefix(sourceKey, sourcePrefix) {
+			return "", fmt.Errorf("source key %q does not match source.prefix %q", sourceKey, sourcePrefix)
+		}
+		relativeKey = strings.TrimPrefix(sourceKey, sourcePrefix)
+	}
+	return mapping.DestPrefix + relativeKey, nil
 }
 
 // New creates a Syncer, choosing the right Source/Destination implementation
@@ -45,7 +71,7 @@ func New(cfg *config.Config) (*Syncer, error) {
 func buildSource(ep config.EndpointConfig) (store.Source, error) {
 	switch ep.Provider {
 	case "oss":
-		return store.NewOSSStore(ep.Endpoint, ep.AccessKeyID, ep.AccessKeySecret, ep.Bucket)
+		return store.NewOSSStore(ep.Endpoint, ep.AccessKeyID, ep.AccessKeySecret, ep.Bucket, ep.InsecureSkipVerify)
 	case "s3":
 		return store.NewS3Store(ep.Endpoint, ep.Region, ep.AccessKeyID, ep.AccessKeySecret, ep.Bucket, ep.ForcePathStyle)
 	default:
@@ -59,7 +85,7 @@ func buildDest(ep config.EndpointConfig) (store.Destination, error) {
 	case "obs":
 		return store.NewOBSStore(ep.Endpoint, ep.AccessKeyID, ep.AccessKeySecret, ep.Bucket)
 	case "oss":
-		return store.NewOSSStore(ep.Endpoint, ep.AccessKeyID, ep.AccessKeySecret, ep.Bucket)
+		return store.NewOSSStore(ep.Endpoint, ep.AccessKeyID, ep.AccessKeySecret, ep.Bucket, ep.InsecureSkipVerify)
 	case "s3":
 		return store.NewS3Store(ep.Endpoint, ep.Region, ep.AccessKeyID, ep.AccessKeySecret, ep.Bucket, ep.ForcePathStyle)
 	default:
@@ -85,54 +111,60 @@ func (s *Syncer) RunWithContext(ctx context.Context) error {
 		return fmt.Errorf("unknown sync mode: %s", mode)
 	}
 
-	// Record session start.
-	sid, err := s.database.StartSession(mode)
-	if err != nil {
-		log.Printf("[WARN] could not record session: %v", err)
-	}
-	s.sessionID = sid
-
 	var syncErr error
-	switch mode {
-	case "full":
-		log.Println("[INFO] starting full sync")
-		syncErr = s.listAndSync(ctx, time.Time{})
-	case "incremental":
-		log.Println("[INFO] starting incremental sync")
-		syncErr = s.runIncremental(ctx)
-	}
+	for _, mapping := range s.cfg.PrefixMappings() {
+		log.Printf("[INFO] processing mapping %s", mappingLabel(mapping))
 
-	// Persist session outcome.
-	if sid != 0 {
-		status := "completed"
-		errMsg := ""
-		if syncErr != nil {
-			status = "failed"
-			errMsg = syncErr.Error()
+		scope := s.scope(mapping)
+		sid, err := s.database.StartSession(scope, mode)
+		if err != nil {
+			log.Printf("[WARN] could not record session for %s: %v", mappingLabel(mapping), err)
 		}
-		if ferr := s.database.FinishSession(sid, status, errMsg); ferr != nil {
-			log.Printf("[WARN] could not finish session: %v", ferr)
+		s.sessionID = sid
+
+		switch mode {
+		case "full":
+			log.Printf("[INFO] starting full sync for %s", mappingLabel(mapping))
+			syncErr = s.listAndSync(ctx, mapping, time.Time{})
+		case "incremental":
+			log.Printf("[INFO] starting incremental sync for %s", mappingLabel(mapping))
+			syncErr = s.runIncremental(ctx, mapping)
+		}
+
+		if sid != 0 {
+			status := "completed"
+			errMsg := ""
+			if syncErr != nil {
+				status = "failed"
+				errMsg = syncErr.Error()
+			}
+			if ferr := s.database.FinishSession(sid, status, errMsg); ferr != nil {
+				log.Printf("[WARN] could not finish session for %s: %v", mappingLabel(mapping), ferr)
+			}
+		}
+		if syncErr != nil {
+			break
 		}
 	}
 
 	// Always print final stats so partial progress is visible.
-	if stats, statsErr := s.database.Stats(); statsErr == nil {
+	if stats, statsErr := s.database.StatsForScopes(s.cfg.Scopes()); statsErr == nil {
 		log.Printf("[INFO] final db stats: %v", stats)
 	}
 	return syncErr
 }
 
-func (s *Syncer) runIncremental(ctx context.Context) error {
-	lastSync, err := s.database.GetLastSyncTime()
+func (s *Syncer) runIncremental(ctx context.Context, mapping config.PrefixMapping) error {
+	lastSync, err := s.database.GetLastSyncTime(s.scope(mapping))
 	if err != nil {
 		return fmt.Errorf("get last sync time: %w", err)
 	}
 	if lastSync.IsZero() {
-		log.Println("[INFO] no previous sync found, performing full scan")
+		log.Printf("[INFO] no previous sync found for %s, performing full scan", mappingLabel(mapping))
 	} else {
-		log.Printf("[INFO] last sync at %s, syncing newer objects", lastSync.Format(time.RFC3339))
+		log.Printf("[INFO] last sync for %s at %s, syncing newer objects", mappingLabel(mapping), lastSync.Format(time.RFC3339))
 	}
-	return s.listAndSync(ctx, lastSync)
+	return s.listAndSync(ctx, mapping, lastSync)
 }
 
 // listAndSync pages through source objects and queues eligible ones for syncing.
@@ -147,113 +179,38 @@ func (s *Syncer) runIncremental(ctx context.Context) error {
 //
 // Memory model: O(page_size) per iteration — ETags are fetched only for the
 // current page's candidate keys.  No full-table map is kept in memory.
-func (s *Syncer) listAndSync(ctx context.Context, sinceTime time.Time) error {
+func (s *Syncer) listAndSync(ctx context.Context, mapping config.PrefixMapping, sinceTime time.Time) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	limiter := NewRateLimiter(s.cfg.Sync.RateLimitMbps)
-	pool := NewWorkerPool(ctx, s.cfg.Sync.Concurrency, s.src, s.dst, s.database, limiter)
+	scope := s.scope(mapping)
+	tracker := RegisterTracker(scope)
+	pool := NewWorkerPool(ctx, s.cfg.Sync.Concurrency, scope, s.src, s.dst, s.database, limiter, tracker, s.cfg.Sync.RetryCount)
 	defer pool.Close()
 
 	var (
-		pageToken string
 		totalList int
 		totalSync int
 	)
+	batches := make(chan taskBatch, 16)
+	produceErr := make(chan error, 1)
+	go func() {
+		produceErr <- s.produceTaskBatches(ctx, mapping, sinceTime, scope, tracker, batches)
+	}()
 
-	for {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-
-		objects, nextToken, isTruncated, err := s.src.ListPage(
-			s.cfg.Source.Prefix,
-			pageToken,
-			s.cfg.Sync.PageSize,
-		)
-		if err != nil {
-			return fmt.Errorf("list page (token=%q): %w", pageToken, err)
-		}
-
-		totalList += len(objects)
-		log.Printf("[INFO] listed %d objects (truncated=%v)", len(objects), isTruncated)
-
-		// --- Pass 1: time filter + collect candidate keys for this page ---
-		type candidate struct {
-			key  string
-			etag string
-			size int64
-			lm   string
-		}
-		var candidates []candidate
-		var candidateKeys []string
-
-		for _, obj := range objects {
-			// Skip directory markers.
-			if obj.Size == 0 && len(obj.Key) > 0 && obj.Key[len(obj.Key)-1] == '/' {
-				continue
-			}
-
-			// Incremental: skip objects older than the baseline (started_at of last session).
-			if !sinceTime.IsZero() && !obj.LastModified.After(sinceTime) {
-				continue
-			}
-
-			candidates = append(candidates, candidate{
-				key:  obj.Key,
-				etag: obj.ETag,
-				size: obj.Size,
-				lm:   obj.LastModified.Format(time.RFC3339),
-			})
-			candidateKeys = append(candidateKeys, obj.Key)
-		}
-
-		// --- Pass 2: per-page ETag lookup (O(page_size), not O(total)) ---
-		// Both modes: skip if ETag matches the last-synced record.
-		// For full sync this is the only skip criterion.
-		// For incremental this guards the overlap window.
-		var syncedETags map[string]string
-		if len(candidateKeys) > 0 {
-			syncedETags, err = s.database.LoadETagsForKeys(candidateKeys)
-			if err != nil {
-				log.Printf("[WARN] load etags for page: %v", err)
-				syncedETags = make(map[string]string)
-			}
-		}
-
-		// --- Pass 3: build pending list and tasks, filtering by ETag ---
-		var pending []db.SyncRecord
-		var tasks []SyncTask
-
-		for _, c := range candidates {
-			if etag, ok := syncedETags[c.key]; ok && etag == c.etag {
-				continue // content unchanged, skip
-			}
-
-			pending = append(pending, db.SyncRecord{
-				Key:          c.key,
-				ETag:         c.etag,
-				Size:         c.size,
-				LastModified: c.lm,
-			})
-			tasks = append(tasks, SyncTask{Key: c.key, Size: c.size})
-		}
-
-		// Single transaction per page — O(1) DB round-trips regardless of page size.
-		if len(pending) > 0 {
-			if err := s.database.BatchUpsertPending(pending); err != nil {
-				log.Printf("[WARN] batch upsert pending: %v", err)
-			}
-		}
-
-		for _, t := range tasks {
+	for batch := range batches {
+		totalList += batch.listed
+		for _, t := range batch.tasks {
 			if !pool.Submit(t) {
+				cancel()
 				return ctx.Err()
 			}
 			totalSync++
 		}
-
-		if !isTruncated {
-			break
-		}
-		pageToken = nextToken
+	}
+	if err := <-produceErr; err != nil {
+		return err
 	}
 
 	log.Printf("[INFO] listing done: listed=%d queued=%d — waiting for workers…", totalList, totalSync)
@@ -267,8 +224,8 @@ func (s *Syncer) listAndSync(ctx context.Context, sinceTime time.Time) error {
 	// For full sync (sinceTime.IsZero()), IterateStaleRecords is a no-op:
 	// every object is re-examined by the listing phase anyway.
 	var requeued int
-	iterErr := s.database.IterateStaleRecords(sinceTime, func(key string, size int64) error {
-		if !pool.Submit(SyncTask{Key: key, Size: size}) {
+	iterErr := s.database.IterateStaleRecords(scope, sinceTime, func(sourceKey, destKey string, size int64) error {
+		if !pool.Submit(SyncTask{SourceKey: sourceKey, DestKey: destKey, Size: size}) {
 			return ctx.Err()
 		}
 		requeued++
@@ -284,3 +241,113 @@ func (s *Syncer) listAndSync(ctx context.Context, sinceTime time.Time) error {
 	return nil
 }
 
+func (s *Syncer) produceTaskBatches(
+	ctx context.Context,
+	mapping config.PrefixMapping,
+	sinceTime time.Time,
+	scope string,
+	tracker *TransferTracker,
+	batches chan<- taskBatch,
+) error {
+	defer close(batches)
+
+	var pageToken string
+	for {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
+		objects, nextToken, isTruncated, err := s.src.ListPage(
+			mapping.SourcePrefix,
+			pageToken,
+			s.cfg.Sync.PageSize,
+		)
+		if err != nil {
+			return fmt.Errorf("list page (token=%q): %w", pageToken, err)
+		}
+
+		log.Printf("[INFO] listed %d objects (truncated=%v)", len(objects), isTruncated)
+
+		type candidate struct {
+			sourceKey string
+			destKey   string
+			etag      string
+			size      int64
+			lm        string
+		}
+		var candidates []candidate
+		var candidateKeys []string
+
+		for _, obj := range objects {
+			if obj.Size == 0 && len(obj.Key) > 0 && obj.Key[len(obj.Key)-1] == '/' {
+				continue
+			}
+			if !sinceTime.IsZero() && !obj.LastModified.After(sinceTime) {
+				continue
+			}
+
+			destKey, err := s.mapObjectKey(mapping, obj.Key)
+			if err != nil {
+				return err
+			}
+			candidates = append(candidates, candidate{
+				sourceKey: obj.Key,
+				destKey:   destKey,
+				etag:      obj.ETag,
+				size:      obj.Size,
+				lm:        obj.LastModified.Format(time.RFC3339),
+			})
+			candidateKeys = append(candidateKeys, destKey)
+		}
+
+		var syncedETags map[string]string
+		if len(candidateKeys) > 0 {
+			syncedETags, err = s.database.LoadETagsForKeys(scope, candidateKeys)
+			if err != nil {
+				log.Printf("[WARN] load etags for page: %v", err)
+				syncedETags = make(map[string]string)
+			}
+		}
+
+		var pending []db.SyncRecord
+		var tasks []SyncTask
+		for _, c := range candidates {
+			if etag, ok := syncedETags[c.destKey]; ok && etag == c.etag {
+				continue
+			}
+
+			pending = append(pending, db.SyncRecord{
+				Scope:        scope,
+				Key:          c.destKey,
+				SourceKey:    c.sourceKey,
+				ETag:         c.etag,
+				Size:         c.size,
+				LastModified: c.lm,
+			})
+			tasks = append(tasks, SyncTask{
+				SourceKey: c.sourceKey,
+				DestKey:   c.destKey,
+				Size:      c.size,
+			})
+		}
+
+		if len(pending) > 0 {
+			if err := s.database.BatchUpsertPending(pending); err != nil {
+				log.Printf("[WARN] batch upsert pending: %v", err)
+			}
+		}
+		tracker.AddDiscovered(len(tasks))
+
+		select {
+		case batches <- taskBatch{listed: len(objects), tasks: tasks}:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+
+		if !isTruncated {
+			tracker.MarkDiscoveryDone()
+			return nil
+		}
+		pageToken = nextToken
+	}
+}

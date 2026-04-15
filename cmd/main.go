@@ -2,7 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
+	"log"
 	"os"
 	"os/signal"
 	"syscall"
@@ -65,10 +68,18 @@ func rootCmd() *cobra.Command {
 				return s.RunWithContext(ctx)
 			}
 
+			logWriter := log.Writer()
+			log.SetOutput(io.Discard)
+			defer log.SetOutput(logWriter)
+
 			// TUI mode: run sync in a background goroutine while the TUI
 			// owns the terminal. Open the DB a second time (read-only poll).
 			doneCh := make(chan error, 1)
-			go func() { doneCh <- s.RunWithContext(ctx) }()
+			syncDone := make(chan struct{})
+			go func() {
+				doneCh <- s.RunWithContext(ctx)
+				close(syncDone)
+			}()
 
 			database, err := db.Open(cfg.Sync.DBPath)
 			if err != nil {
@@ -76,12 +87,18 @@ func rootCmd() *cobra.Command {
 			}
 			defer database.Close()
 
-			tuiErr := tui.RunTUI(database, 500*time.Millisecond)
+			userQuit, tuiErr := tui.RunSyncTUI(database, cfg.Scopes(), 500*time.Millisecond, syncDone)
+			if userQuit {
+				cancel()
+			}
 
 			// Wait for sync to finish.
 			syncErr := <-doneCh
 			if tuiErr != nil {
 				return tuiErr
+			}
+			if userQuit && errors.Is(syncErr, context.Canceled) {
+				return nil
 			}
 			return syncErr
 		},
@@ -115,9 +132,10 @@ func rootCmd() *cobra.Command {
 
 			useTUI := (statsWatch || tui.IsTTY()) && !statsNoTUI
 			if useTUI {
-				return tui.RunTUI(database, statsInterval)
+				_, err := tui.RunTUI(database, cfg.Scopes(), statsInterval)
+				return err
 			}
-			return tui.PrintHeadless(os.Stdout, database)
+			return tui.PrintHeadless(os.Stdout, database, cfg.Scopes())
 		},
 	}
 	statsCmd.Flags().StringVarP(&cfgPath, "config", "c", "config.yaml", "path to config file")
@@ -125,7 +143,42 @@ func rootCmd() *cobra.Command {
 	statsCmd.Flags().BoolVarP(&statsWatch, "watch", "w", false, "force TUI watch mode even without a TTY")
 	statsCmd.Flags().BoolVar(&statsNoTUI, "no-tui", false, "disable TUI and print a plain snapshot")
 
-	root.AddCommand(syncCmd, statsCmd)
+	var failedLimit int
+	failedCmd := &cobra.Command{
+		Use:   "failed",
+		Short: "Show failed files and error reasons from the database",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.Load(cfgPath)
+			if err != nil {
+				return fmt.Errorf("load config: %w", err)
+			}
+
+			database, err := db.Open(cfg.Sync.DBPath)
+			if err != nil {
+				return fmt.Errorf("open db: %w", err)
+			}
+			defer database.Close()
+
+			failed, err := database.FailedRecordsForScopes(cfg.Scopes(), failedLimit)
+			if err != nil {
+				return err
+			}
+			if len(failed) == 0 {
+				fmt.Fprintln(os.Stdout, "No failed files.")
+				return nil
+			}
+
+			for i, record := range failed {
+				fmt.Fprintf(os.Stdout, "%d. %s -> %s\n", i+1, record.SourceKey, record.Key)
+				fmt.Fprintf(os.Stdout, "   size: %d bytes\n", record.Size)
+				fmt.Fprintf(os.Stdout, "   error: %s\n", record.ErrorMsg)
+			}
+			return nil
+		},
+	}
+	failedCmd.Flags().StringVarP(&cfgPath, "config", "c", "config.yaml", "path to config file")
+	failedCmd.Flags().IntVar(&failedLimit, "limit", 100, "maximum failed files to show")
+
+	root.AddCommand(syncCmd, statsCmd, failedCmd)
 	return root
 }
-
