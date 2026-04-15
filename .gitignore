@@ -27,4 +27,5 @@ vendor/
 *.swo
 
 
-config-handao-dev.yaml
+
+config-*.yaml

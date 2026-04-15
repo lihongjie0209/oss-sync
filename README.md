@@ -20,6 +20,8 @@
 
 ## 快速开始
 
+运维手册见：[`docs/operations-manual.md`](docs/operations-manual.md)
+
 ### 前置依赖
 
 - Go 1.21+（无需 CGO，纯 Go 编译）
