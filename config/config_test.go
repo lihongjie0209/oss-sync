@@ -54,6 +54,9 @@ sync:
 	if cfg.Dest.Prefix != "backup/2026/" {
 		t.Fatalf("expected normalized dest prefix, got %q", cfg.Dest.Prefix)
 	}
+	if cfg.Dest.Visibility != "" {
+		t.Fatalf("expected empty dest visibility by default, got %q", cfg.Dest.Visibility)
+	}
 
 	mappings := cfg.PrefixMappings()
 	if len(mappings) != 1 {
@@ -139,5 +142,54 @@ sync:
 `))
 	if err == nil {
 		t.Fatal("expected invalid mode error")
+	}
+}
+
+func TestLoadNormalizesDestVisibility(t *testing.T) {
+	cfg, err := Load(writeConfigFile(t, `
+source:
+  provider: "oss"
+  endpoint: "src-endpoint"
+  access_key_id: "ak"
+  access_key_secret: "sk"
+  bucket: "src-bucket"
+dest:
+  provider: "obs"
+  endpoint: "dst-endpoint"
+  access_key_id: "ak"
+  access_key_secret: "sk"
+  bucket: "dst-bucket"
+  visibility: "PUBLIC-READ"
+sync:
+  db_path: "./sync.db"
+`))
+	if err != nil {
+		t.Fatalf("load config with visibility: %v", err)
+	}
+	if cfg.Dest.Visibility != "public-read" {
+		t.Fatalf("expected normalized visibility, got %q", cfg.Dest.Visibility)
+	}
+}
+
+func TestLoadRejectsUnsupportedVisibilityForOSSDest(t *testing.T) {
+	_, err := Load(writeConfigFile(t, `
+source:
+  provider: "oss"
+  endpoint: "src-endpoint"
+  access_key_id: "ak"
+  access_key_secret: "sk"
+  bucket: "src-bucket"
+dest:
+  provider: "oss"
+  endpoint: "dst-endpoint"
+  access_key_id: "ak"
+  access_key_secret: "sk"
+  bucket: "dst-bucket"
+  visibility: "bucket-owner-full-control"
+sync:
+  db_path: "./sync.db"
+`))
+	if err == nil {
+		t.Fatal("expected unsupported dest visibility error")
 	}
 }

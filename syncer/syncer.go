@@ -250,7 +250,7 @@ func (s *Syncer) listAndSync(ctx context.Context, mapping config.PrefixMapping, 
 	limiter := NewRateLimiter(s.cfg.Sync.RateLimitMbps)
 	scope := s.scope(mapping)
 	tracker := RegisterTracker(scope)
-	pool := NewWorkerPool(ctx, s.cfg.Sync.Concurrency, scope, s.src, s.dst, s.database, limiter, tracker, s.cfg.Sync.RetryCount)
+	pool := NewWorkerPool(ctx, s.cfg.Sync.Concurrency, scope, s.src, s.dst, s.database, limiter, tracker, s.cfg.Sync.RetryCount, s.cfg.Dest.Visibility)
 	defer pool.Close()
 
 	var (

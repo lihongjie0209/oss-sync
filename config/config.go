@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/oss-sync/store"
 	"gopkg.in/yaml.v3"
 )
 
@@ -22,6 +23,10 @@ type EndpointConfig struct {
 	// Prefix scopes objects to a directory-like prefix.
 	// For source it limits listing; for dest it prefixes uploaded object keys.
 	Prefix string `yaml:"prefix"`
+
+	// Visibility controls uploaded object ACL / canned ACL on the destination side.
+	// Empty means provider default. "source" inherits from source object ACL.
+	Visibility string `yaml:"visibility"`
 
 	// S3-specific options (used when provider = "s3").
 	Region         string `yaml:"region"`
@@ -101,6 +106,9 @@ func (c *Config) validate() error {
 	if c.Sync.Mode != "" && c.Sync.Mode != "full" && c.Sync.Mode != "incremental" {
 		return fmt.Errorf("sync.mode must be 'full' or 'incremental'")
 	}
+	if err := store.ValidateDestinationVisibility(c.Dest.Provider, store.NormalizeVisibility(c.Dest.Visibility)); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -128,6 +136,7 @@ func (c *Config) setDefaults() {
 	}
 	c.Source.Prefix = normalizePrefix(c.Source.Prefix)
 	c.Dest.Prefix = normalizePrefix(c.Dest.Prefix)
+	c.Dest.Visibility = string(store.NormalizeVisibility(c.Dest.Visibility))
 	for i := range c.Sync.Mappings {
 		c.Sync.Mappings[i].SourcePrefix = normalizePrefix(c.Sync.Mappings[i].SourcePrefix)
 		c.Sync.Mappings[i].DestPrefix = normalizePrefix(c.Sync.Mappings[i].DestPrefix)

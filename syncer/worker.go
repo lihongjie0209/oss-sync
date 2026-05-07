@@ -22,13 +22,14 @@ type SyncTask struct {
 
 // Worker holds the dependencies needed to execute a single sync task.
 type Worker struct {
-	scope    string
-	src      store.Source
-	dst      store.Destination
-	database *db.DB
-	limiter  *rate.Limiter
-	tracker  *TransferTracker
-	retries  int
+	scope      string
+	src        store.Source
+	dst        store.Destination
+	database   *db.DB
+	limiter    *rate.Limiter
+	tracker    *TransferTracker
+	retries    int
+	visibility store.ObjectVisibility
 }
 
 // WorkerPool manages a pool of concurrent sync workers.
@@ -51,17 +52,19 @@ func NewWorkerPool(
 	limiter *rate.Limiter,
 	tracker *TransferTracker,
 	retries int,
+	dstVisibility string,
 ) *WorkerPool {
 	ctx, cancel := context.WithCancel(ctx)
 	pool := &WorkerPool{
 		worker: Worker{
-			scope:    scope,
-			src:      src,
-			dst:      dst,
-			database: database,
-			limiter:  limiter,
-			tracker:  tracker,
-			retries:  retries,
+			scope:      scope,
+			src:        src,
+			dst:        dst,
+			database:   database,
+			limiter:    limiter,
+			tracker:    tracker,
+			retries:    retries,
+			visibility: store.NormalizeVisibility(dstVisibility),
 		},
 		tasks:  make(chan SyncTask, concurrency*2),
 		ctx:    ctx,
@@ -153,7 +156,18 @@ func (w *Worker) processOnce(ctx context.Context, task SyncTask) error {
 
 	limited := WrapReader(ctx, stream, w.limiter, w.tracker)
 
-	if err := w.dst.PutObjectFromStream(task.DestKey, limited, task.Size); err != nil {
+	visibility := w.visibility
+	if visibility == store.VisibilitySource {
+		var err error
+		visibility, err = w.src.GetObjectVisibility(task.SourceKey)
+		if err != nil {
+			return fmt.Errorf("resolve source visibility: %w", err)
+		}
+	}
+
+	if err := w.dst.PutObjectFromStream(task.DestKey, limited, task.Size, store.UploadOptions{
+		Visibility: visibility,
+	}); err != nil {
 		return fmt.Errorf("upload: %w", err)
 	}
 	return nil

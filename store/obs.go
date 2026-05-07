@@ -24,7 +24,7 @@ func NewOBSStore(endpoint, accessKeyID, accessKeySecret, bucketName string) (*OB
 
 // PutObjectFromStream uploads body to key in OBS.
 // size must be the exact content length; pass -1 if unknown (chunked transfer).
-func (s *OBSStore) PutObjectFromStream(key string, body io.Reader, size int64) error {
+func (s *OBSStore) PutObjectFromStream(key string, body io.Reader, size int64, opts UploadOptions) error {
 	input := &obs.PutObjectInput{}
 	input.Bucket = s.bucketName
 	input.Key = key
@@ -32,6 +32,9 @@ func (s *OBSStore) PutObjectFromStream(key string, body io.Reader, size int64) e
 
 	if size >= 0 {
 		input.ContentLength = size
+	}
+	if acl, ok := toOBSAcl(opts.Visibility); ok {
+		input.ACL = acl
 	}
 
 	if _, err := s.client.PutObject(input); err != nil {
@@ -46,6 +49,25 @@ func (s *OBSStore) Probe() error {
 		return fmt.Errorf("head obs bucket %s: %w", s.bucketName, err)
 	}
 	return nil
+}
+
+func toOBSAcl(visibility ObjectVisibility) (obs.AclType, bool) {
+	switch visibility {
+	case VisibilityPrivate:
+		return obs.AclPrivate, true
+	case VisibilityPublicRead:
+		return obs.AclPublicRead, true
+	case VisibilityPublicReadWrite:
+		return obs.AclPublicReadWrite, true
+	case VisibilityAuthenticatedRead:
+		return obs.AclAuthenticatedRead, true
+	case VisibilityBucketOwnerRead:
+		return obs.AclBucketOwnerRead, true
+	case VisibilityBucketOwnerFullControl:
+		return obs.AclBucketOwnerFullControl, true
+	default:
+		return "", false
+	}
 }
 
 // Close releases OBS client resources.

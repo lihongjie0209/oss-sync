@@ -19,10 +19,12 @@ import (
 )
 
 type fakeSource struct {
-	objects []store.Object
-	data    map[string][]byte
-	err     error
-	listErr error
+	objects       []store.Object
+	data          map[string][]byte
+	err           error
+	listErr       error
+	visibility    store.ObjectVisibility
+	visibilityErr error
 }
 
 func (s *fakeSource) ListPage(prefix, pageToken string, pageSize int) ([]store.Object, string, bool, error) {
@@ -66,14 +68,25 @@ func (s *fakeSource) GetObjectStream(key string) (io.ReadCloser, error) {
 	return io.NopCloser(bytes.NewReader(s.data[key])), nil
 }
 
-type fakeDest struct {
-	mu       sync.Mutex
-	uploaded map[string][]byte
-	err      error
-	probeErr error
+func (s *fakeSource) GetObjectVisibility(key string) (store.ObjectVisibility, error) {
+	if s.visibilityErr != nil {
+		return store.VisibilityUnspecified, s.visibilityErr
+	}
+	if s.visibility == store.VisibilityUnspecified {
+		return store.VisibilityPrivate, nil
+	}
+	return s.visibility, nil
 }
 
-func (d *fakeDest) PutObjectFromStream(key string, body io.Reader, size int64) error {
+type fakeDest struct {
+	mu         sync.Mutex
+	uploaded   map[string][]byte
+	visibility map[string]store.ObjectVisibility
+	err        error
+	probeErr   error
+}
+
+func (d *fakeDest) PutObjectFromStream(key string, body io.Reader, size int64, opts store.UploadOptions) error {
 	if d.err != nil {
 		return d.err
 	}
@@ -86,7 +99,11 @@ func (d *fakeDest) PutObjectFromStream(key string, body io.Reader, size int64) e
 	if d.uploaded == nil {
 		d.uploaded = make(map[string][]byte)
 	}
+	if d.visibility == nil {
+		d.visibility = make(map[string]store.ObjectVisibility)
+	}
 	d.uploaded[key] = payload
+	d.visibility[key] = opts.Visibility
 	return nil
 }
 
@@ -113,12 +130,16 @@ func (s *flakySource) GetObjectStream(key string) (io.ReadCloser, error) {
 	return io.NopCloser(bytes.NewReader(s.data[key])), nil
 }
 
+func (s *flakySource) GetObjectVisibility(key string) (store.ObjectVisibility, error) {
+	return store.VisibilityPrivate, nil
+}
+
 type flakyDest struct {
 	failuresRemaining int
 	uploaded          map[string][]byte
 }
 
-func (d *flakyDest) PutObjectFromStream(key string, body io.Reader, size int64) error {
+func (d *flakyDest) PutObjectFromStream(key string, body io.Reader, size int64, opts store.UploadOptions) error {
 	if d.failuresRemaining > 0 {
 		d.failuresRemaining--
 		return errors.New("temporary upload failure")
@@ -185,6 +206,9 @@ func TestSyncerRunMapsSourceKeysToDestKeys(t *testing.T) {
 	want := []string{"backup/2026/a.txt", "backup/2026/sub/b.txt"}
 	if !slices.Equal(uploaded, want) {
 		t.Fatalf("unexpected uploaded keys: got %v want %v", uploaded, want)
+	}
+	if dst.visibility["backup/2026/a.txt"] != store.VisibilityUnspecified {
+		t.Fatalf("expected default visibility to stay unspecified, got %q", dst.visibility["backup/2026/a.txt"])
 	}
 
 	stats, err := database.StatsForScopes(cfg.Scopes())
@@ -302,8 +326,10 @@ func TestSyncerNewRunCloseAndProviderValidation(t *testing.T) {
 
 type nonProbeDest struct{}
 
-func (d nonProbeDest) PutObjectFromStream(key string, body io.Reader, size int64) error { return nil }
-func (d nonProbeDest) Close()                                                           {}
+func (d nonProbeDest) PutObjectFromStream(key string, body io.Reader, size int64, opts store.UploadOptions) error {
+	return nil
+}
+func (d nonProbeDest) Close() {}
 
 func TestEndpointConfigValidationHelpers(t *testing.T) {
 	if err := testSourceStore(&fakeSource{}, ""); err != nil {
@@ -335,13 +361,14 @@ func TestWorkerProcessMarksFailuresAndSuccess(t *testing.T) {
 		t.Fatalf("upsert success record: %v", err)
 	}
 	worker := Worker{
-		scope:    scope,
-		src:      &fakeSource{data: map[string][]byte{"src/success.txt": []byte("ok")}},
-		dst:      &fakeDest{},
-		database: database,
-		limiter:  NewRateLimiter(0),
-		tracker:  &TransferTracker{},
-		retries:  3,
+		scope:      scope,
+		src:        &fakeSource{data: map[string][]byte{"src/success.txt": []byte("ok")}},
+		dst:        &fakeDest{},
+		database:   database,
+		limiter:    NewRateLimiter(0),
+		tracker:    &TransferTracker{},
+		retries:    3,
+		visibility: store.VisibilityUnspecified,
 	}
 	if err := worker.process(context.Background(), SyncTask{
 		SourceKey: "src/success.txt",
@@ -395,6 +422,68 @@ func TestWorkerProcessMarksFailuresAndSuccess(t *testing.T) {
 	}
 	if record.Status != db.StatusFailed {
 		t.Fatalf("expected failed status after upload error, got %+v", record)
+	}
+}
+
+func TestWorkerProcessPropagatesSourceVisibility(t *testing.T) {
+	database := testDB(t)
+	defer database.Close()
+
+	const scope = "scope-visibility"
+	lastModified := time.Now().UTC().Format(time.RFC3339)
+	if err := database.UpsertPending(scope, "dst/public.txt", "src/public.txt", "etag", 2, lastModified); err != nil {
+		t.Fatalf("upsert pending: %v", err)
+	}
+
+	dst := &fakeDest{}
+	worker := Worker{
+		scope:      scope,
+		src:        &fakeSource{data: map[string][]byte{"src/public.txt": []byte("ok")}, visibility: store.VisibilityPublicRead},
+		dst:        dst,
+		database:   database,
+		limiter:    NewRateLimiter(0),
+		tracker:    &TransferTracker{},
+		retries:    1,
+		visibility: store.VisibilitySource,
+	}
+	if err := worker.process(context.Background(), SyncTask{
+		SourceKey: "src/public.txt",
+		DestKey:   "dst/public.txt",
+		Size:      2,
+	}); err != nil {
+		t.Fatalf("process with source visibility: %v", err)
+	}
+	if dst.visibility["dst/public.txt"] != store.VisibilityPublicRead {
+		t.Fatalf("expected propagated source visibility, got %q", dst.visibility["dst/public.txt"])
+	}
+}
+
+func TestWorkerProcessFailsWhenSourceVisibilityCannotBeResolved(t *testing.T) {
+	database := testDB(t)
+	defer database.Close()
+
+	const scope = "scope-visibility-fail"
+	lastModified := time.Now().UTC().Format(time.RFC3339)
+	if err := database.UpsertPending(scope, "dst/object.txt", "src/object.txt", "etag", 2, lastModified); err != nil {
+		t.Fatalf("upsert pending: %v", err)
+	}
+
+	worker := Worker{
+		scope:      scope,
+		src:        &fakeSource{data: map[string][]byte{"src/object.txt": []byte("ok")}, visibilityErr: errors.New("acl denied")},
+		dst:        &fakeDest{},
+		database:   database,
+		limiter:    NewRateLimiter(0),
+		tracker:    &TransferTracker{},
+		retries:    1,
+		visibility: store.VisibilitySource,
+	}
+	if err := worker.process(context.Background(), SyncTask{
+		SourceKey: "src/object.txt",
+		DestKey:   "dst/object.txt",
+		Size:      2,
+	}); err == nil {
+		t.Fatal("expected source visibility resolution failure")
 	}
 }
 
@@ -516,7 +605,7 @@ func TestWorkerPoolCancelStopsSubmission(t *testing.T) {
 	database := testDB(t)
 	defer database.Close()
 
-	pool := NewWorkerPool(context.Background(), 1, "scope-a", &fakeSource{}, &fakeDest{}, database, NewRateLimiter(0), &TransferTracker{}, 3)
+	pool := NewWorkerPool(context.Background(), 1, "scope-a", &fakeSource{}, &fakeDest{}, database, NewRateLimiter(0), &TransferTracker{}, 3, "")
 	pool.Cancel()
 	for range 20 {
 		if ok := pool.Submit(SyncTask{SourceKey: "src/a.txt", DestKey: "dst/a.txt", Size: 1}); !ok {

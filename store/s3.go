@@ -9,6 +9,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 )
 
 // S3Store is a generic S3-compatible store (works with MinIO, AWS S3, R2, etc.).
@@ -94,10 +95,26 @@ func (s *S3Store) GetObjectStream(key string) (io.ReadCloser, error) {
 	return result.Body, nil
 }
 
+// GetObjectVisibility returns the source object's canned ACL when it can be inferred.
+func (s *S3Store) GetObjectVisibility(key string) (ObjectVisibility, error) {
+	result, err := s.client.GetObjectAcl(context.Background(), &s3.GetObjectAclInput{
+		Bucket: aws.String(s.bucketName),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		return VisibilityUnspecified, fmt.Errorf("get s3 object acl %s: %w", key, err)
+	}
+	visibility, err := inferS3Visibility(result)
+	if err != nil {
+		return VisibilityUnspecified, fmt.Errorf("infer s3 object acl %s: %w", key, err)
+	}
+	return visibility, nil
+}
+
 // PutObjectFromStream uploads body to key.
 // size >= 0 sets Content-Length; pass -1 for unknown size (chunked upload).
 // Uses UNSIGNED-PAYLOAD so the body stream doesn't need to be seekable.
-func (s *S3Store) PutObjectFromStream(key string, body io.Reader, size int64) error {
+func (s *S3Store) PutObjectFromStream(key string, body io.Reader, size int64, opts UploadOptions) error {
 	input := &s3.PutObjectInput{
 		Bucket: aws.String(s.bucketName),
 		Key:    aws.String(key),
@@ -105,6 +122,9 @@ func (s *S3Store) PutObjectFromStream(key string, body io.Reader, size int64) er
 	}
 	if size >= 0 {
 		input.ContentLength = aws.Int64(size)
+	}
+	if acl, ok := toS3ACL(opts.Visibility); ok {
+		input.ACL = acl
 	}
 
 	// v4.SwapComputePayloadSHA256ForUnsignedPayloadMiddleware replaces the
@@ -132,3 +152,106 @@ func (s *S3Store) Probe() error {
 
 // Close is a no-op (AWS SDK manages connection pool internally).
 func (s *S3Store) Close() {}
+
+func toS3ACL(visibility ObjectVisibility) (types.ObjectCannedACL, bool) {
+	switch visibility {
+	case VisibilityPrivate:
+		return types.ObjectCannedACLPrivate, true
+	case VisibilityPublicRead:
+		return types.ObjectCannedACLPublicRead, true
+	case VisibilityPublicReadWrite:
+		return types.ObjectCannedACLPublicReadWrite, true
+	case VisibilityAuthenticatedRead:
+		return types.ObjectCannedACLAuthenticatedRead, true
+	case VisibilityBucketOwnerRead:
+		return types.ObjectCannedACLBucketOwnerRead, true
+	case VisibilityBucketOwnerFullControl:
+		return types.ObjectCannedACLBucketOwnerFullControl, true
+	default:
+		return "", false
+	}
+}
+
+func inferS3Visibility(result *s3.GetObjectAclOutput) (ObjectVisibility, error) {
+	if result == nil {
+		return VisibilityUnspecified, fmt.Errorf("empty acl result")
+	}
+
+	ownerID := ""
+	if result.Owner != nil && result.Owner.ID != nil {
+		ownerID = aws.ToString(result.Owner.ID)
+	}
+
+	groupPerms := map[string]map[types.Permission]bool{}
+	canonicalPerms := map[string]map[types.Permission]bool{}
+
+	for _, grant := range result.Grants {
+		if grant.Grantee == nil {
+			continue
+		}
+		grantee := grant.Grantee
+		switch grantee.Type {
+		case types.TypeGroup:
+			uri := aws.ToString(grantee.URI)
+			if uri == "" {
+				continue
+			}
+			if groupPerms[uri] == nil {
+				groupPerms[uri] = map[types.Permission]bool{}
+			}
+			groupPerms[uri][grant.Permission] = true
+		case types.TypeCanonicalUser:
+			id := aws.ToString(grantee.ID)
+			if id == "" || id == ownerID {
+				continue
+			}
+			if canonicalPerms[id] == nil {
+				canonicalPerms[id] = map[types.Permission]bool{}
+			}
+			canonicalPerms[id][grant.Permission] = true
+		}
+	}
+
+	const (
+		allUsersURI           = "http://acs.amazonaws.com/groups/global/AllUsers"
+		authenticatedUsersURI = "http://acs.amazonaws.com/groups/global/AuthenticatedUsers"
+	)
+
+	if perms := groupPerms[allUsersURI]; len(perms) > 0 {
+		if perms[types.PermissionRead] && (perms[types.PermissionWriteAcp] || perms[types.PermissionFullControl]) {
+			return VisibilityPublicReadWrite, nil
+		}
+		if perms[types.PermissionRead] {
+			return VisibilityPublicRead, nil
+		}
+		return VisibilityUnspecified, fmt.Errorf("unsupported AllUsers grant set")
+	}
+
+	if perms := groupPerms[authenticatedUsersURI]; len(perms) > 0 {
+		if perms[types.PermissionRead] {
+			return VisibilityAuthenticatedRead, nil
+		}
+		return VisibilityUnspecified, fmt.Errorf("unsupported AuthenticatedUsers grant set")
+	}
+
+	if len(canonicalPerms) == 1 {
+		for _, perms := range canonicalPerms {
+			if hasOnlyPermission(perms, types.PermissionRead) {
+				return VisibilityBucketOwnerRead, nil
+			}
+			if hasOnlyPermission(perms, types.PermissionFullControl) {
+				return VisibilityBucketOwnerFullControl, nil
+			}
+		}
+	}
+
+	if len(groupPerms) == 0 && len(canonicalPerms) == 0 {
+		return VisibilityPrivate, nil
+	}
+
+	return VisibilityUnspecified, fmt.Errorf("unsupported custom ACL grants")
+}
+
+func hasOnlyPermission(perms map[types.Permission]bool, permission types.Permission) bool {
+	return len(perms) == 1 && perms[permission]
+}

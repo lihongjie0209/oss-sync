@@ -94,6 +94,7 @@ dest:
   access_key_secret: "YOUR_OBS_SK"
   bucket: "my-dest-bucket"
   prefix: "backup/2026/"                    # 可选：写入目标端指定目录
+  visibility: "source"                      # 可选：source | private | public-read | public-read-write | authenticated-read | bucket-owner-read | bucket-owner-full-control
 
 sync:
   mode: "incremental"    # full | incremental
@@ -118,6 +119,7 @@ sync:
 | `dest.provider` | string | 目标端类型：`obs`（华为云）、`oss`、`s3` |
 | `source.prefix` | string | 源端目录前缀；仅同步该目录下的对象 |
 | `dest.prefix` | string | 目标端目录前缀；将源端相对路径写入该目录下 |
+| `dest.visibility` | string | 目标对象可见性；留空使用目标端默认值，`source` 表示尽量与源对象 ACL 保持一致 |
 | `source.force_path_style` | bool | S3 Path-Style 寻址，MinIO 必须设为 `true` |
 | `sync.mode` | string | `full` 全量 / `incremental` 增量 |
 | `sync.concurrency` | int | 并发上传 Worker 数，建议 4–20 |
@@ -126,6 +128,14 @@ sync:
 | `sync.retry_count` | int | 单文件失败自动重试次数，默认 `3` |
 | `sync.db_path` | string | SQLite 状态库路径 |
 | `sync.mappings` | array | 多组目录映射列表；设置后优先于 `source.prefix` / `dest.prefix` |
+
+`dest.visibility` 当前支持：
+
+- 通用值：`source`、`private`、`public-read`、`public-read-write`
+- OBS / S3 额外支持：`authenticated-read`、`bucket-owner-read`、`bucket-owner-full-control`
+- OSS 目标端仅支持：`private`、`public-read`、`public-read-write`
+
+当设置为 `source` 时，程序会读取源对象 ACL 并映射到目标端；当前面向标准 canned ACL，若源端对象使用的是无法识别的自定义 ACL，会显式报错。
 
 ### 执行同步
 

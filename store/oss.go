@@ -73,11 +73,23 @@ func (s *OSSStore) GetObjectStream(key string) (io.ReadCloser, error) {
 	return body, nil
 }
 
+// GetObjectVisibility returns the object's OSS ACL in generic form.
+func (s *OSSStore) GetObjectVisibility(key string) (ObjectVisibility, error) {
+	result, err := s.bucket.GetObjectACL(key)
+	if err != nil {
+		return VisibilityUnspecified, fmt.Errorf("get oss object acl %s: %w", key, err)
+	}
+	return NormalizeVisibility(result.ACL), nil
+}
+
 // PutObjectFromStream uploads body to key (OSSStore can also act as Destination).
-func (s *OSSStore) PutObjectFromStream(key string, body io.Reader, size int64) error {
+func (s *OSSStore) PutObjectFromStream(key string, body io.Reader, size int64, uploadOpts UploadOptions) error {
 	var opts []oss.Option
 	if size >= 0 {
 		opts = append(opts, oss.ContentLength(size))
+	}
+	if acl, ok := toOSSACL(uploadOpts.Visibility); ok {
+		opts = append(opts, oss.ObjectACL(acl))
 	}
 	if err := s.bucket.PutObject(key, body, opts...); err != nil {
 		return fmt.Errorf("put oss object %s: %w", key, err)
@@ -91,6 +103,19 @@ func (s *OSSStore) Probe() error {
 		return fmt.Errorf("probe oss bucket: %w", err)
 	}
 	return nil
+}
+
+func toOSSACL(visibility ObjectVisibility) (oss.ACLType, bool) {
+	switch visibility {
+	case VisibilityPrivate:
+		return oss.ACLPrivate, true
+	case VisibilityPublicRead:
+		return oss.ACLPublicRead, true
+	case VisibilityPublicReadWrite:
+		return oss.ACLPublicReadWrite, true
+	default:
+		return "", false
+	}
 }
 
 // Close is a no-op for OSS (SDK manages connection pool internally).

@@ -94,6 +94,7 @@ dest:
   access_key_secret: "YOUR_DEST_SK"
   bucket: "dest-bucket"
   prefix: "handao-dev-backup/"
+  visibility: "source"
   insecure_skip_verify: false
 
 sync:
@@ -124,6 +125,7 @@ dest:
   access_key_secret: "YOUR_OBS_SK"
   bucket: "dest-bucket"
   prefix: "backup/2026/"
+  visibility: "source"
 
 sync:
   mode: "incremental"
@@ -208,6 +210,7 @@ sync:
 | `dest.endpoint` | 目标端访问地址 | 建议写完整协议 |
 | `dest.bucket` | 目标 bucket 名称 | 需确认账号有写权限 |
 | `dest.prefix` | 目标写入目录 | 留空表示按原 key 写入 |
+| `dest.visibility` | 目标对象可见性 | 留空使用目标端默认值，`source` 表示尽量与源对象 ACL 保持一致 |
 | `dest.force_path_style` | S3 path style 开关 | 仅 `s3` provider 有效 |
 | `dest.insecure_skip_verify` | 是否跳过 TLS 证书校验 | 私有 CA / 自签证书时使用 |
 | `sync.mode` | `full` 或 `incremental` | 首次迁移建议 `full` |
@@ -217,6 +220,14 @@ sync:
 | `sync.retry_count` | 单文件失败自动重试次数 | 默认 3 |
 | `sync.db_path` | SQLite 状态库路径 | 建议放在持久目录 |
 | `sync.mappings` | 多组目录映射 | 与 `source.prefix` / `dest.prefix` 二选一优先使用 |
+
+`dest.visibility` 支持范围：
+
+- 所有目标端通用：`source`、`private`、`public-read`、`public-read-write`
+- `obs` / `s3` 额外支持：`authenticated-read`、`bucket-owner-read`、`bucket-owner-full-control`
+- `oss` 目标端仅支持：`private`、`public-read`、`public-read-write`
+
+如果配置为 `source`，程序会读取源对象 ACL 并映射到目标端；该模式面向标准 canned ACL。若源对象使用的是无法识别的自定义 ACL，任务会报错，便于运维排查。
 
 ## 4. 核心命令
 

@@ -19,6 +19,7 @@ dest:
   access_key_secret: "YOUR_OBS_ACCESS_KEY_SECRET"
   bucket: "my-obs-bucket"
   prefix: "backup/2026/"                      # optional: write into this destination directory
+  visibility: "source"                        # optional: source | private | public-read | public-read-write | authenticated-read | bucket-owner-read | bucket-owner-full-control
 
 sync:
   mode: "incremental"         # full | incremental
